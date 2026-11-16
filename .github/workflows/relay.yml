@@ -1,0 +1,58 @@
+name: Slack relay
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Private source run ID (leave both inputs empty to verify settings)
+        type: string
+      session_artifact_id:
+        description: Private session artifact ID
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  relay:
+    if: github.ref == 'refs/heads/main' && github.run_attempt == '1'
+    runs-on: ${{ vars.SLACK_RELAY_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - run: npm ci --ignore-scripts --no-audit --no-fund --loglevel=silent
+      - uses: actions/create-github-app-token@v3
+        id: source
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID || secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: powerpower2005
+          repositories: stocker
+          permission-actions: read
+      - uses: actions/github-script@v9
+        name: Set up artifact service access
+        with:
+          script: |
+            for (const key of ['ACTIONS_RUNTIME_TOKEN', 'ACTIONS_RESULTS_URL']) {
+              const value = process.env[key];
+              if (!value) throw new Error('Artifact service unavailable');
+              core.setSecret(value);
+              core.exportVariable(key, value);
+            }
+      - name: Run Slack relay
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SESSION_ARTIFACT_ID: ${{ inputs.session_artifact_id }}
+          APP_ACTOR: ${{ steps.source.outputs.app-slug }}[bot]
+          SOURCE_TOKEN: ${{ steps.source.outputs.token }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_SECTOR_CHANNEL_ID: ${{ secrets.SLACK_SECTOR_CHANNEL_ID }}
+          SLACK_LOG_CHANNEL_ID: ${{ secrets.SLACK_LOG_CHANNEL_ID }}
+          SLACK_ERROR_CHANNEL_ID: ${{ secrets.SLACK_ERROR_CHANNEL_ID }}
+          SLACK_CHART_SIGNAL_CHANNEL_ID: ${{ secrets.SLACK_CHART_SIGNAL_CHANNEL_ID }}
+        run: node relay.mjs >/dev/null 2>&1
