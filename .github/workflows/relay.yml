@@ -26,7 +26,7 @@ jobs:
         with:
           node-version: '24'
       - run: npm ci --ignore-scripts --no-audit --no-fund --loglevel=silent
-      - uses: actions/create-github-app-token@v3
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
         id: source
         with:
           client-id: ${{ vars.APP_CLIENT_ID || secrets.APP_CLIENT_ID }}
@@ -34,7 +34,7 @@ jobs:
           owner: powerpower2005
           repositories: stocker
           permission-actions: read
-      - uses: actions/github-script@v9
+      - uses: actions/github-script@373c709c69115d41ff229c7e5df9f8788daa9553 # v9
         name: Set up artifact service access
         with:
           script: |

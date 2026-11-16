@@ -45,8 +45,14 @@ async function slackRequest(method, payload) {
   });
 }
 
+async function verifySlack(destinations) {
+  return Array.isArray(destinations) && destinations.length === 4 &&
+    destinations.every(channel => channelId.test(channel ?? '') && channels.has(channel)) && !!slackToken &&
+    (await (await slackRequest('auth.test', {})).json()).ok === true;
+}
+
 async function postSlack(payload) {
-  const { channel, text, thread_ts, reply_broadcast } = payload;
+  const { channel, text, thread_ts, reply_broadcast, retry_rate_limit } = payload;
   if (!slackToken || !channelId.test(channel ?? '') || !channels.has(channel)) {
     return { status: 'failed', error: 'slack_channel_or_token_not_configured' };
   }
@@ -54,10 +60,17 @@ async function postSlack(payload) {
     return { status: 'failed', error: 'invalid_message' };
   }
   try {
-    const response = await slackRequest('chat.postMessage', {
+    const message = {
       channel, text, ...(thread_ts && { thread_ts, reply_broadcast: reply_broadcast === true }),
       unfurl_links: false, unfurl_media: false,
-    });
+    };
+    let response = await slackRequest('chat.postMessage', message);
+    for (let retry = 0; response.status === 429 && retry_rate_limit === true && retry < 2; retry++) {
+      const wait = response.headers.get('retry-after');
+      if (!/^\d+$/.test(wait ?? '') || Number(wait) > 60) break;
+      await delay(Math.max(1, Number(wait)) * 1000);
+      response = await slackRequest('chat.postMessage', message);
+    }
     if (response.status === 429) return { status: 'failed', error: 'rate_limited' };
     if (!response.ok) return { status: 'uncertain', error: 'http_failure' };
     const body = await response.json();
@@ -106,7 +119,10 @@ async function serve(directory) {
       if (request) {
         const payload = await loadRequest(request.id, directory);
         if (payload.close === true) return;
-        await saveReceipt(await postSlack(payload), key, name, slot, directory);
+        const receipt = payload.verify === true
+          ? (await verifySlack(payload.channels) ? { status: 'verified' } : { status: 'failed', error: 'relay_configuration_mismatch' })
+          : await postSlack(payload);
+        await saveReceipt(receipt, key, name, slot, directory);
         break;
       }
       if (Date.now() >= deadline) return;
@@ -115,16 +131,13 @@ async function serve(directory) {
   }
 }
 
-const directory = await mkdtemp(join(tmpdir(), 'slack-relay-'));
+const directory = await mkdtemp(join(process.env.RUNNER_TEMP || tmpdir(), 'slack-relay-'));
 try {
   if (!runId && !sessionId) {
     // Manual preflight verifies access without posting to any Slack channel.
     await sourceApi('/artifacts?per_page=1');
-    if (!slackToken || [...channels].some(channel => !channelId.test(channel))) throw new Error('Invalid Slack configuration');
-    for (const key of ['SECTOR', 'LOG', 'ERROR', 'CHART_SIGNAL']) {
-      if (!process.env['SLACK_' + key + '_CHANNEL_ID']) throw new Error('Missing Slack route');
-    }
-    if ((await (await slackRequest('auth.test', {})).json()).ok !== true) throw new Error('Slack authentication failed');
+    const destinations = ['SECTOR', 'LOG', 'ERROR', 'CHART_SIGNAL'].map(key => process.env['SLACK_' + key + '_CHANNEL_ID']);
+    if (!(await verifySlack(destinations))) throw new Error('Invalid Slack configuration');
   } else {
     await serve(directory);
   }
