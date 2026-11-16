@@ -8,14 +8,16 @@ import { DefaultArtifactClient } from '@actions/artifact';
 const source = 'powerpower2005/stocker';
 const { SOURCE_RUN_ID: runId, SESSION_ARTIFACT_ID: sessionId, SOURCE_TOKEN: sourceToken } = process.env;
 const slackToken = process.env.SLACK_BOT_TOKEN;
-const channels = new Set([
-  process.env.SLACK_SECTOR_CHANNEL_ID,
-  process.env.SLACK_LOG_CHANNEL_ID,
-  process.env.SLACK_ERROR_CHANNEL_ID,
-  process.env.SLACK_CHART_SIGNAL_CHANNEL_ID,
-].filter(Boolean));
+const routes = {
+  sector: process.env.SLACK_SECTOR_CHANNEL_ID,
+  log: process.env.SLACK_LOG_CHANNEL_ID,
+  error: process.env.SLACK_ERROR_CHANNEL_ID,
+  chart: process.env.SLACK_CHART_SIGNAL_CHANNEL_ID,
+};
+const channels = new Set(Object.values(routes).filter(Boolean));
 const channelId = /^[CG][A-Z0-9]{8,}$/;
 const timestamp = /^\d+\.\d+$/;
+const headline = /^\[\d{4}-\d{2}-\d{2}-[^\[\]\r\n]+\]$/;
 const client = new DefaultArtifactClient();
 
 async function sourceApi(path) {
@@ -52,20 +54,39 @@ async function verifySlack(destinations) {
 }
 
 async function postSlack(payload) {
-  const { channel, text, thread_ts, reply_broadcast, retry_rate_limit } = payload;
+  const { destination, expected_channel, text, thread_ts, title } = payload;
+  // Previously dispatched jobs may still use an approved channel ID directly.
+  const channel = destination === undefined ? payload.channel
+    : Object.hasOwn(routes, destination) ? routes[destination] : undefined;
   if (!slackToken || !channelId.test(channel ?? '') || !channels.has(channel)) {
     return { status: 'failed', error: 'slack_channel_or_token_not_configured' };
+  }
+  if (expected_channel !== undefined && expected_channel !== channel) {
+    return { status: 'failed', error: 'configured_destination_changed' };
   }
   if (typeof text !== 'string' || !text.trim() || text.length > 40_000 || (thread_ts != null && !timestamp.test(thread_ts))) {
     return { status: 'failed', error: 'invalid_message' };
   }
+  if ((title != null && (thread_ts != null || !headline.test(title))) ||
+      (destination !== undefined && thread_ts == null && title == null && !headline.test(text))) {
+    return { status: 'failed', error: 'invalid_headline' };
+  }
+  const retryRateLimit = destination === undefined ? payload.retry_rate_limit === true : destination !== 'chart';
+  const parent = await postMessage(channel, title ?? text, thread_ts, retryRateLimit);
+  if (title == null || parent.status !== 'sent') return parent;
+  const reply = await postMessage(channel, text, parent.slack_ts, retryRateLimit);
+  if (reply.status === 'sent') return parent;
+  return { status: 'uncertain', error: reply.error, parent_ts: parent.slack_ts };
+}
+
+async function postMessage(channel, text, threadTs, retryRateLimit) {
   try {
     const message = {
-      channel, text, ...(thread_ts && { thread_ts, reply_broadcast: reply_broadcast === true }),
+      channel, text, ...(threadTs && { thread_ts: threadTs }),
       unfurl_links: false, unfurl_media: false,
     };
     let response = await slackRequest('chat.postMessage', message);
-    for (let retry = 0; response.status === 429 && retry_rate_limit === true && retry < 2; retry++) {
+    for (let retry = 0; response.status === 429 && retryRateLimit && retry < 2; retry++) {
       const wait = response.headers.get('retry-after');
       if (!/^\d+$/.test(wait ?? '') || Number(wait) > 60) break;
       await delay(Math.max(1, Number(wait)) * 1000);
@@ -82,6 +103,22 @@ async function postSlack(payload) {
   } catch {
     return { status: 'uncertain', error: 'transport_or_response_failure' };
   }
+}
+
+async function handleRequest(payload) {
+  if (payload.routes !== undefined) {
+    const requested = payload.routes;
+    if (!Array.isArray(requested) || !requested.length || requested.length > 4 ||
+        requested.some(name => !Object.hasOwn(routes, name) || !channelId.test(routes[name] ?? ''))) {
+      return { status: 'failed', error: 'relay_configuration_mismatch' };
+    }
+    return { status: 'routes', routes: Object.fromEntries(requested.map(name => [name, routes[name]])) };
+  }
+  if (payload.verify === true) {
+    return await verifySlack(payload.channels ?? Object.values(routes)) ? { status: 'verified' }
+      : { status: 'failed', error: 'relay_configuration_mismatch' };
+  }
+  return postSlack(payload);
 }
 
 async function saveReceipt(receipt, key, requestName, slot, directory) {
@@ -119,10 +156,7 @@ async function serve(directory) {
       if (request) {
         const payload = await loadRequest(request.id, directory);
         if (payload.close === true) return;
-        const receipt = payload.verify === true
-          ? (await verifySlack(payload.channels) ? { status: 'verified' } : { status: 'failed', error: 'relay_configuration_mismatch' })
-          : await postSlack(payload);
-        await saveReceipt(receipt, key, name, slot, directory);
+        await saveReceipt(await handleRequest(payload), key, name, slot, directory);
         break;
       }
       if (Date.now() >= deadline) return;
@@ -136,8 +170,7 @@ try {
   if (!runId && !sessionId) {
     // Manual preflight verifies access without posting to any Slack channel.
     await sourceApi('/artifacts?per_page=1');
-    const destinations = ['SECTOR', 'LOG', 'ERROR', 'CHART_SIGNAL'].map(key => process.env['SLACK_' + key + '_CHANNEL_ID']);
-    if (!(await verifySlack(destinations))) throw new Error('Invalid Slack configuration');
+    if (!(await verifySlack(Object.values(routes)))) throw new Error('Invalid Slack configuration');
   } else {
     await serve(directory);
   }

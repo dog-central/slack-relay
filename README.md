@@ -12,6 +12,8 @@ Set these Actions secrets for the approved Slack destinations.
 - SLACK_ERROR_CHANNEL_ID
 - SLACK_CHART_SIGNAL_CHANNEL_ID
 
+This repository owns the Slack routing configuration. Producers submit a sector, log, error or chart destination. A new parent message uses the [YYYY-MM-DD-Topic] title. Details go in its thread. When the producer supplies a recorded channel or thread timestamp, the worker checks the configured channel before using that reference.
+
 Set the SLACK_RELAY_RUNNER Actions variable to an available runner label if this repository uses a designated runner. The default is GitHub-hosted Ubuntu.
 
 Run Slack relay on main with both inputs blank to verify the app's source access, channel ID formats and Slack authentication. The Check Slack relay connection workflow in stocker verifies the request and receipt across both repositories. Its post_report option sends a connection result to the Slack operations channel and checks Slack's acknowledgement.
