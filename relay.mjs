@@ -21,12 +21,20 @@ const headline = /^\[\d{4}-\d{2}-\d{2}-[^\[\]\r\n]+\]$/;
 const client = new DefaultArtifactClient();
 
 async function sourceApi(path) {
-  const response = await fetch('https://api.github.com/repos/' + source + '/actions' + path, {
-    headers: { Authorization: 'Bearer ' + sourceToken, 'X-GitHub-Api-Version': '2026-03-10' },
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!response.ok) throw new Error('Source unavailable');
-  return response.json();
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const response = await fetch('https://api.github.com/repos/' + source + '/actions' + path, {
+        headers: { Authorization: 'Bearer ' + sourceToken, 'X-GitHub-Api-Version': '2026-03-10' },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (response.ok) return await response.json();
+      if (response.status < 500 && response.status !== 429) break;
+    } catch {
+      // This is a read of GitHub metadata. Slack requests keep their own rules.
+    }
+    if (attempt < 3) await delay(1800 * (attempt + 1));
+  }
+  throw new Error('Source unavailable');
 }
 
 async function loadRequest(id, directory) {
