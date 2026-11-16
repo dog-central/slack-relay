@@ -67,14 +67,15 @@ async function postSlack(payload) {
   if (typeof text !== 'string' || !text.trim() || text.length > 40_000 || (thread_ts != null && !timestamp.test(thread_ts))) {
     return { status: 'failed', error: 'invalid_message' };
   }
-  if ((title != null && (thread_ts != null || !headline.test(title))) ||
+  if ((title != null && (typeof title !== 'string' || title.length > 200 || thread_ts != null || !headline.test(title))) ||
       (destination !== undefined && thread_ts == null && title == null && !headline.test(text))) {
     return { status: 'failed', error: 'invalid_headline' };
   }
   const retryRateLimit = destination === undefined ? payload.retry_rate_limit === true : destination !== 'chart';
   const parent = await postMessage(channel, title ?? text, thread_ts, retryRateLimit);
   if (title == null || parent.status !== 'sent') return parent;
-  const reply = await postMessage(channel, text, parent.slack_ts, retryRateLimit);
+  await delay(1100);
+  const reply = await postMessage(channel, text, parent.slack_ts, true);
   if (reply.status === 'sent') return parent;
   return { status: 'uncertain', error: reply.error, parent_ts: parent.slack_ts };
 }
@@ -96,7 +97,8 @@ async function postMessage(channel, text, threadTs, retryRateLimit) {
     if (!response.ok) return { status: 'uncertain', error: 'http_failure' };
     const body = await response.json();
     if (body.ok === false) return { status: 'failed', error: 'slack_rejected' };
-    if (body.ok !== true || body.channel !== channel || !timestamp.test(body.ts ?? '')) {
+    if (body.ok !== true || body.channel !== channel || !timestamp.test(body.ts ?? '') ||
+        (threadTs && body.message?.thread_ts !== threadTs)) {
       return { status: 'uncertain', error: 'invalid_receipt' };
     }
     return { status: 'sent', slack_ts: body.ts };
