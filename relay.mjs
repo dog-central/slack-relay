@@ -20,6 +20,17 @@ const timestamp = /^\d+\.\d+$/;
 const headline = /^\[\d{4}-\d{2}-\d{2}-[^\[\]\r\n]+\]$/;
 const client = new DefaultArtifactClient();
 
+async function retryArtifact(operation) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await operation(attempt);
+    } catch (error) {
+      if (attempt === 3) throw error;
+      await delay(1800 * (attempt + 1));
+    }
+  }
+}
+
 async function sourceApi(path) {
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
@@ -38,14 +49,16 @@ async function sourceApi(path) {
 }
 
 async function loadRequest(id, directory) {
-  await client.downloadArtifact(id, {
-    path: directory,
-    findBy: { token: sourceToken, repositoryOwner: 'powerpower2005', repositoryName: 'stocker', workflowRunId: Number(runId) },
+  return retryArtifact(async () => {
+    await client.downloadArtifact(id, {
+      path: directory,
+      findBy: { token: sourceToken, repositoryOwner: 'powerpower2005', repositoryName: 'stocker', workflowRunId: Number(runId) },
+    });
+    const path = join(directory, 'request.json');
+    const value = JSON.parse(await readFile(path, 'utf8'));
+    await rm(path);
+    return value;
   });
-  const path = join(directory, 'request.json');
-  const value = JSON.parse(await readFile(path, 'utf8'));
-  await rm(path);
-  return value;
 }
 
 async function slackRequest(method, payload) {
@@ -140,7 +153,18 @@ async function saveReceipt(receipt, key, requestName, slot, directory) {
   await writeFile(file, JSON.stringify({
     iv: iv.toString('base64'), data: data.toString('base64'), tag: cipher.getAuthTag().toString('base64'),
   }));
-  await client.uploadArtifact('receipt-' + slot, [file], directory, { retentionDays: 1 });
+  const name = 'receipt-' + slot;
+  await retryArtifact(async attempt => {
+    if (attempt) {
+      try {
+        // A previous upload may have committed even though its response failed.
+        if (await client.getArtifact(name)) return;
+      } catch {
+        // The fixed artifact name makes repeating an upload attempt safe.
+      }
+    }
+    await client.uploadArtifact(name, [file], directory, { retentionDays: 1 });
+  });
 }
 
 async function serve(directory) {
@@ -164,7 +188,13 @@ async function serve(directory) {
       const { artifacts } = await sourceApi('/runs/' + runId + '/artifacts?name=' + name);
       const request = artifacts.find(item => item.name === name && !item.expired);
       if (request) {
-        const payload = await loadRequest(request.id, directory);
+        let payload;
+        try {
+          payload = await loadRequest(request.id, directory);
+        } catch {
+          await saveReceipt({ status: 'failed', error: 'relay_request_unreadable' }, key, name, slot, directory);
+          break;
+        }
         if (payload.close === true) return;
         await saveReceipt(await handleRequest(payload), key, name, slot, directory);
         break;
