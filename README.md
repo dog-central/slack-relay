@@ -14,4 +14,4 @@ Set these Actions secrets for the approved Slack destinations.
 
 Set the SLACK_RELAY_RUNNER Actions variable to an available runner label if this repository uses a designated runner. The default is GitHub-hosted Ubuntu.
 
-To check configuration, manually run Slack relay on main with both inputs blank. That verifies the app's source access, configured channel ID formats and Slack authentication. It sends no message. Use a separately authorized dispatch from stocker to verify actual posting and threaded receipts.
+Run Slack relay on main with both inputs blank to verify the app's source access, channel ID formats and Slack authentication. The Check Slack relay connection workflow in stocker verifies the request and receipt across both repositories. Its post_report option sends a connection result to the Slack operations channel and checks Slack's acknowledgement.
