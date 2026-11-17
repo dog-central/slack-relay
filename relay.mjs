@@ -74,8 +74,30 @@ async function verifySlack(destinations) {
     (await (await slackRequest('auth.test', {})).json()).ok === true;
 }
 
+function validText(value, type, limit) {
+  return value?.type === type && typeof value.text === 'string' &&
+    value.text.trim().length > 0 && value.text.length <= limit && Object.keys(value).length === 2;
+}
+
+function validBlock(block) {
+  switch (block?.type) {
+    case 'header':
+      return Object.keys(block).length === 2 && validText(block.text, 'plain_text', 150);
+    case 'section':
+      return Object.keys(block).length === 2 && validText(block.text, 'mrkdwn', 3000);
+    case 'context':
+      return Object.keys(block).length === 2 && Array.isArray(block.elements) &&
+        block.elements.length > 0 && block.elements.length <= 10 &&
+        block.elements.every(value => validText(value, 'mrkdwn', 3000));
+    case 'divider':
+      return Object.keys(block).length === 1;
+    default:
+      return false;
+  }
+}
+
 async function postSlack(payload) {
-  const { destination, expected_channel, text, thread_ts, title } = payload;
+  const { destination, expected_channel, text, thread_ts, title, blocks } = payload;
   // Previously dispatched jobs may still use an approved channel ID directly.
   const channel = destination === undefined ? payload.channel
     : Object.hasOwn(routes, destination) ? routes[destination] : undefined;
@@ -88,12 +110,17 @@ async function postSlack(payload) {
   if (typeof text !== 'string' || !text.trim() || text.length > 40_000 || (thread_ts != null && !timestamp.test(thread_ts))) {
     return { status: 'failed', error: 'invalid_message' };
   }
+  if (blocks !== undefined && (destination !== 'sector' || title != null ||
+      !Array.isArray(blocks) || !blocks.length || blocks.length > 50 || !blocks.every(validBlock))) {
+    return { status: 'failed', error: 'invalid_blocks' };
+  }
+  const headlineText = blocks === undefined ? text : text.split('\n', 1)[0];
   if ((title != null && (typeof title !== 'string' || title.length > 200 || thread_ts != null || !headline.test(title))) ||
-      (destination !== undefined && thread_ts == null && title == null && !headline.test(text))) {
+      (destination !== undefined && thread_ts == null && title == null && !headline.test(headlineText))) {
     return { status: 'failed', error: 'invalid_headline' };
   }
   const retryRateLimit = destination === undefined ? payload.retry_rate_limit === true : destination !== 'chart';
-  const parent = await postMessage(channel, title ?? text, thread_ts, retryRateLimit);
+  const parent = await postMessage(channel, title ?? text, thread_ts, retryRateLimit, blocks);
   if (title == null || parent.status !== 'sent') return parent;
   await delay(1100);
   const reply = await postMessage(channel, text, parent.slack_ts, true);
@@ -101,10 +128,10 @@ async function postSlack(payload) {
   return { status: 'uncertain', error: reply.error, parent_ts: parent.slack_ts };
 }
 
-async function postMessage(channel, text, threadTs, retryRateLimit) {
+async function postMessage(channel, text, threadTs, retryRateLimit, blocks) {
   try {
     const message = {
-      channel, text, ...(threadTs && { thread_ts: threadTs }),
+      channel, text, ...(threadTs && { thread_ts: threadTs }), ...(blocks && { blocks }),
       unfurl_links: false, unfurl_media: false,
     };
     let response = await slackRequest('chat.postMessage', message);
