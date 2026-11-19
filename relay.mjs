@@ -61,10 +61,12 @@ async function loadRequest(id, directory) {
   });
 }
 
-async function slackRequest(method, payload) {
-  return fetch('https://slack.com/api/' + method, {
-    method: 'POST', headers: { Authorization: 'Bearer ' + slackToken, 'Content-Type': 'application/json; charset=utf-8' },
-    body: JSON.stringify(payload), signal: AbortSignal.timeout(20_000),
+async function slackRequest(method, payload, httpMethod = 'POST') {
+  const url = new URL('https://slack.com/api/' + method);
+  if (httpMethod === 'GET') url.search = new URLSearchParams(payload).toString();
+  return fetch(url, {
+    method: httpMethod, headers: { Authorization: 'Bearer ' + slackToken, 'Content-Type': 'application/json; charset=utf-8' },
+    ...(httpMethod === 'POST' && { body: JSON.stringify(payload) }), signal: AbortSignal.timeout(20_000),
   });
 }
 
@@ -155,7 +157,46 @@ async function postMessage(channel, text, threadTs, retryRateLimit, blocks) {
   }
 }
 
+async function updateThreadIndex(payload) {
+  const channel = routes.sector;
+  const { thread_ts: threadTs, index_ts: indexTs, targets } = payload.thread_index ?? {};
+  const isTimestamp = value => typeof value === 'string' && timestamp.test(value);
+  if (!slackToken || payload.destination !== 'sector' || !channelId.test(channel ?? '') ||
+      payload.expected_channel !== channel || !isTimestamp(threadTs) || !isTimestamp(indexTs) ||
+      !Array.isArray(targets) || targets.length !== 3 || targets.some(target =>
+        !isTimestamp(target?.ts) || typeof target.label !== 'string' ||
+        !target.label.trim() || target.label.length > 100 || /[<>&|\r\n]/.test(target.label)) ||
+      new Set([threadTs, indexTs, ...targets.map(target => target.ts)]).size !== 5) {
+    return { status: 'failed', error: 'invalid_thread_index' };
+  }
+  try {
+    const permalinks = await Promise.all([indexTs, ...targets.map(target => target.ts)].map(async ts => {
+      const response = await slackRequest('chat.getPermalink', { channel, message_ts: ts }, 'GET');
+      if (!response.ok) throw new Error('Slack permalink unavailable');
+      const result = await response.json();
+      const url = new URL(result.permalink);
+      if (result.ok !== true || result.channel !== channel || url.protocol !== 'https:' ||
+          !url.hostname.endsWith('.slack.com') || url.searchParams.get('thread_ts') !== threadTs) {
+        throw new Error('Slack reply is outside the requested thread');
+      }
+      return url.href;
+    }));
+    const text = '*목록 바로가기*\n' +
+      targets.map(({ label }, index) => `<${permalinks[index + 1]}|${label}>`).join('\n');
+    const response = await slackRequest('chat.update', { channel, ts: indexTs, text });
+    if (!response.ok) return { status: 'uncertain', error: 'thread_index_update_http_failure' };
+    const body = await response.json();
+    if (body.ok !== true || body.channel !== channel || body.ts !== indexTs) {
+      return { status: 'failed', error: 'thread_index_update_rejected' };
+    }
+    return { status: 'sent', slack_ts: indexTs };
+  } catch {
+    return { status: 'uncertain', error: 'thread_index_links_unconfirmed' };
+  }
+}
+
 async function handleRequest(payload) {
+  if (payload.thread_index !== undefined) return updateThreadIndex(payload);
   if (payload.routes !== undefined) {
     const requested = payload.routes;
     if (!Array.isArray(requested) || !requested.length || requested.length > 4 ||
